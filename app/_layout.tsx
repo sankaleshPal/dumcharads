@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useFonts, Fredoka_600SemiBold, Fredoka_700Bold } from "@expo-google-fonts/fredoka";
@@ -6,11 +7,18 @@ import { View } from "react-native";
 import { useStore, useThemeColors } from "@/store";
 
 export default function Layout() {
-  const [loaded] = useFonts({
+  const [loaded, error] = useFonts({
     Fredoka_600SemiBold, Fredoka_700Bold, Nunito_500Medium, Nunito_700Bold,
   });
   const theme = useStore((s) => s.theme);
   const C = useThemeColors();
+
+  useEffect(() => {
+    if (error) {
+      console.error("Font loading error:", error);
+      throw error;
+    }
+  }, [error]);
 
   if (!loaded) return <View style={{ flex: 1, backgroundColor: C.bg }} />;
 

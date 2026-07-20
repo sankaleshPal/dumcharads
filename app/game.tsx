@@ -12,6 +12,9 @@ import type { Movie } from "@/types";
 
 type TurnPhase = "ready" | "playing" | "turnOver" | "gameOver" | "poolEmpty";
 
+// once revealed, the title stays up at least this long so the actor can read it
+const MIN_REVEAL_MS = 6000;
+
 /**
  * Per-player turn: configurable timer · unlimited Guessed✓Next · max 3 skips
  * (3rd skip zeroes the timer) · movies never repeat within a game.
@@ -31,6 +34,13 @@ export default function Game() {
   const [skipsLeft, setSkipsLeft] = useState(settings.maxSkips);
   const [endReason, setEndReason] = useState<"time" | "skips">("time");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revealAt = useRef(0);
+
+  // clear the pending auto-hide on unmount
+  useEffect(() => () => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+  }, []);
 
   // ---- animations (built-in Animated, native driver) ----
   const cardScale = useRef(new Animated.Value(1)).current;
@@ -97,9 +107,23 @@ export default function Game() {
     if (m) setPhase("playing");
   }
 
+  function reveal() {
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    revealAt.current = Date.now();
+    setRevealed(true);
+  }
+
+  /** hide on release, but never sooner than MIN_REVEAL_MS after the reveal */
+  function conceal() {
+    const remaining = MIN_REVEAL_MS - (Date.now() - revealAt.current);
+    if (remaining <= 0) { setRevealed(false); return; }
+    hideTimer.current = setTimeout(() => { setRevealed(false); hideTimer.current = null; }, remaining);
+  }
+
   async function loadMovie(first = false): Promise<Movie | null> {
     const m = await nextMovie(settings.yearFrom, settings.yearTo);
     if (!m) { stopTimer(); setPhase("poolEmpty"); return null; }
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     setMovie(m);
     setRevealed(false);
     // card entrance: pop-in spring
@@ -220,8 +244,8 @@ export default function Game() {
       >
         <Pressable
           style={s.card}
-          onPressIn={() => setRevealed(true)}
-          onPressOut={() => setRevealed(false)}
+          onPressIn={reveal}
+          onPressOut={conceal}
         >
           {revealed && movie ? (
             <>
@@ -251,7 +275,7 @@ export default function Game() {
           ) : (
             <>
               <Text style={{ fontSize: 48 }}>🤫</Text>
-              <Text style={s.holdHint}>Hold to reveal{"\n"}(actor only!)</Text>
+              <Text style={s.holdHint}>Hold to reveal (actor only!){"\n"}Stays up 6 sec after you let go</Text>
             </>
           )}
         </Pressable>
