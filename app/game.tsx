@@ -1,35 +1,64 @@
 import { useEffect, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, Vibration, View } from "react-native";
+import {
+  Alert, Animated, BackHandler, Easing, Image, Pressable, StyleSheet, Text, View,
+} from "react-native";
 import { router } from "expo-router";
+import * as Haptics from "expo-haptics";
 import { nextMovie } from "@/db";
-import { useStore } from "@/store";
-import { C } from "@/constants";
+import { useStore, useThemeColors } from "@/store";
+import { FONT } from "@/constants";
+import { CornerButton, GlowButton, Screen } from "@/ui";
 import type { Movie } from "@/types";
 
 type TurnPhase = "ready" | "playing" | "turnOver" | "gameOver" | "poolEmpty";
 
 /**
- * Gameplay — per-player turn:
- * - timer set in setup (e.g., 10 min) counts down
- * - NEXT: team guessed it → +1 point → new movie (unlimited within timer)
- * - SKIP: discard movie, max 3; 3rd skip forces timer to 0 → "All chances used!"
- * - every displayed movie is marked used → never repeats this game
+ * Per-player turn: configurable timer · unlimited Guessed✓Next · max 3 skips
+ * (3rd skip zeroes the timer) · movies never repeat within a game.
  */
 export default function Game() {
   const { settings, teams, addScore } = useStore();
   const totalTurns = settings.roundsPerTeam * 2;
+  const C = useThemeColors();
+  const s = getStyles(C);
 
-  const [turnIdx, setTurnIdx] = useState(0);          // 0,2,… = Team A; 1,3,… = Team B
+  const [turnIdx, setTurnIdx] = useState(0);
   const [phase, setPhase] = useState<TurnPhase>("ready");
   const [secondsLeft, setSecondsLeft] = useState(settings.turnMinutes * 60);
   const [movie, setMovie] = useState<Movie | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [guessed, setGuessed] = useState(0);
   const [skipsLeft, setSkipsLeft] = useState(settings.maxSkips);
+  const [endReason, setEndReason] = useState<"time" | "skips">("time");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ---- animations (built-in Animated, native driver) ----
+  const cardScale = useRef(new Animated.Value(1)).current;
+  const cardShake = useRef(new Animated.Value(0)).current;
+  const flash = useRef(new Animated.Value(0)).current;       // green celebration overlay
+  const plusOneY = useRef(new Animated.Value(0)).current;
+  const plusOneOpacity = useRef(new Animated.Value(0)).current;
+  const timerPulse = useRef(new Animated.Value(1)).current;
 
   const teamIdx = (turnIdx % 2) as 0 | 1;
   const team = teams[teamIdx];
+
+  // ---- exit guard: hardware back + ✕ button both confirm before quitting ----
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      confirmExit();
+      return true; // never pop silently mid-game
+    });
+    return () => sub.remove();
+  }, [phase]);
+
+  function confirmExit() {
+    if (phase === "gameOver" || phase === "poolEmpty") { router.replace("/result"); return; }
+    Alert.alert("Leave game?", "Current scores will be lost.", [
+      { text: "Keep playing", style: "cancel" },
+      { text: "Quit", style: "destructive", onPress: () => { stopTimer(); router.replace("/home"); } },
+    ]);
+  }
 
   // ---- timer ----
   useEffect(() => {
@@ -37,15 +66,25 @@ export default function Game() {
     timerRef.current = setInterval(() => {
       setSecondsLeft((sec) => {
         if (sec <= 1) { endTurn("time"); return 0; }
-        if (sec <= 31) Vibration.vibrate(50);
         return sec - 1;
       });
     }, 1000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    return () => stopTimer();
   }, [phase]);
 
+  // pulse the timer in the last 30s
+  useEffect(() => {
+    if (phase === "playing" && secondsLeft <= 30 && secondsLeft > 0) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      Animated.sequence([
+        Animated.timing(timerPulse, { toValue: 1.15, duration: 120, useNativeDriver: true }),
+        Animated.spring(timerPulse, { toValue: 1, useNativeDriver: true }),
+      ]).start();
+    }
+  }, [secondsLeft]);
+
   function stopTimer() {
-    if (timerRef.current) clearInterval(timerRef.current);
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
   }
 
   // ---- turn flow ----
@@ -53,41 +92,56 @@ export default function Game() {
     setGuessed(0);
     setSkipsLeft(settings.maxSkips);
     setSecondsLeft(settings.turnMinutes * 60);
-    const m = await loadMovie();
-    if (!m) return;
-    setPhase("playing");
+    setEndReason("time");
+    const m = await loadMovie(true);
+    if (m) setPhase("playing");
   }
 
-  async function loadMovie(): Promise<Movie | null> {
+  async function loadMovie(first = false): Promise<Movie | null> {
     const m = await nextMovie(settings.yearFrom, settings.yearTo);
     if (!m) { stopTimer(); setPhase("poolEmpty"); return null; }
     setMovie(m);
     setRevealed(false);
+    // card entrance: pop-in spring
+    cardScale.setValue(first ? 0.6 : 0.8);
+    Animated.spring(cardScale, { toValue: 1, friction: 5, tension: 90, useNativeDriver: true }).start();
     return m;
   }
 
-  /** Team guessed the movie → +1, show another */
+  /** Guessed ✅ → celebrate → +1 → next movie */
   async function onNext() {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setGuessed((g) => g + 1);
     addScore(teamIdx, 1);
+    // green flash + floating +1
+    flash.setValue(0.9);
+    Animated.timing(flash, { toValue: 0, duration: 550, useNativeDriver: true }).start();
+    plusOneY.setValue(0); plusOneOpacity.setValue(1);
+    Animated.parallel([
+      Animated.timing(plusOneY, { toValue: -90, duration: 700, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+      Animated.timing(plusOneOpacity, { toValue: 0, duration: 700, useNativeDriver: true }),
+    ]).start();
     await loadMovie();
   }
 
-  /** Discard without a point. 3rd skip = timer forced to zero, turn over. */
+  /** Skip ❌ → shake → 3rd skip force-ends the turn */
   async function onSkip() {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    Animated.sequence(
+      [12, -12, 8, -8, 0].map((x) =>
+        Animated.timing(cardShake, { toValue: x, duration: 55, useNativeDriver: true })
+      )
+    ).start();
     const left = skipsLeft - 1;
     setSkipsLeft(left);
-    if (left <= 0) {
-      setSecondsLeft(0);        // timer automatically gets zero
-      endTurn("skips");
-      return;
-    }
+    if (left <= 0) { setSecondsLeft(0); endTurn("skips"); return; }
     await loadMovie();
   }
 
-  function endTurn(_reason: "time" | "skips") {
+  function endTurn(reason: "time" | "skips") {
     stopTimer();
-    Vibration.vibrate(400);
+    setEndReason(reason);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     setPhase(turnIdx + 1 >= totalTurns ? "gameOver" : "turnOver");
   }
 
@@ -100,133 +154,166 @@ export default function Game() {
   const ss = String(secondsLeft % 60).padStart(2, "0");
   const lowTime = secondsLeft <= 30;
 
-  // ---------- screens ----------
-  if (phase === "ready")
-    return (
-      <Center>
-        <Text style={s.bigEmoji}>🎭</Text>
-        <Text style={s.h1}>{team.name}'s turn</Text>
-        <Text style={s.p}>
-          {settings.turnMinutes} minutes on the clock · {settings.maxSkips} skips{"\n"}
-          Pass the phone to the actor, then press start.
-        </Text>
-        <Cta label="Start Turn ▶" onPress={startTurn} />
-      </Center>
-    );
+  // ---------- inter-turn screens ----------
+  if (phase !== "playing") {
+    const cfg = {
+      ready: {
+        icon: require("../assets/icon_charades.png"), title: `${team.name}'s turn`,
+        sub: `${settings.turnMinutes} min on the clock · ${settings.maxSkips} skips\nPass the phone to the actor, then start!`,
+        cta: "Start Turn ▶", onCta: startTurn,
+      },
+      turnOver: {
+        emoji: endReason === "skips" ? "🙅" : "⏰",
+        title: endReason === "skips" ? "All chances used!" : "Time's up!",
+        sub: `${team.name} guessed ${guessed} movie${guessed === 1 ? "" : "s"}`,
+        cta: "Next Player →", onCta: nextTurn,
+      },
+      gameOver: {
+        emoji: "🏁", title: "Game over!",
+        sub: `${team.name} guessed ${guessed} movie${guessed === 1 ? "" : "s"}`,
+        cta: "Final Scoreboard 🏆", onCta: () => router.replace("/result"),
+      },
+      poolEmpty: {
+        emoji: "🎬", title: "All movies used!",
+        sub: "Every movie in your year filter has been played.",
+        cta: "See Results", onCta: () => router.replace("/result"),
+      },
+    }[phase];
 
-  if (phase === "poolEmpty")
     return (
-      <Center>
-        <Text style={s.bigEmoji}>🎬</Text>
-        <Text style={s.h1}>All movies used!</Text>
-        <Text style={s.p}>Every movie in your year filter has been played.</Text>
-        <Cta label="See Results" onPress={() => router.replace("/result")} />
-      </Center>
-    );
-
-  if (phase === "turnOver" || phase === "gameOver")
-    return (
-      <Center>
-        <Text style={s.bigEmoji}>{skipsLeft <= 0 ? "🙅" : "⏰"}</Text>
-        <Text style={s.h1}>{skipsLeft <= 0 ? "All chances used — turn over!" : "Time's up!"}</Text>
-        <Text style={s.p}>
-          {team.name} guessed <Text style={{ color: C.green, fontWeight: "800" }}>{guessed}</Text> movies
-        </Text>
-        {phase === "turnOver" ? (
-          <Cta label="Next Player →" onPress={nextTurn} />
+      <Screen style={s.center}>
+        <CornerButton icon="✕" onPress={confirmExit} />
+        {cfg.icon ? (
+          <Image source={cfg.icon} style={s.phaseIcon} />
         ) : (
-          <Cta label="Final Scoreboard 🏆" onPress={() => router.replace("/result")} />
+          <Text style={s.bigEmoji}>{cfg.emoji}</Text>
         )}
-      </Center>
+        <Text style={[s.h1, phase === "ready" ? { color: team.color } : null]}>{cfg.title}</Text>
+        <Text style={s.p}>{cfg.sub}</Text>
+        <GlowButton label={cfg.cta} onPress={cfg.onCta} />
+      </Screen>
     );
+  }
 
-  // phase === "playing"
+
+  // ---------- playing ----------
   return (
-    <View style={s.root}>
+    <Screen style={{ padding: 24, paddingTop: 56 }}>
       <View style={s.topBar}>
+        <Pressable onPress={confirmExit} hitSlop={12} style={s.exitMini}>
+          <Text style={{ color: C.dim, fontSize: 16 }}>✕</Text>
+        </Pressable>
         <Text style={[s.teamTag, { color: team.color }]}>{team.name}</Text>
-        <Text style={[s.timer, lowTime && { color: C.red }]}>{mm}:{ss}</Text>
-        <Text style={s.skips}>{"●".repeat(skipsLeft)}{"○".repeat(settings.maxSkips - skipsLeft)}</Text>
+        <Animated.Text
+          style={[s.timer, lowTime && { color: C.red }, { transform: [{ scale: timerPulse }] }]}
+        >
+          {mm}:{ss}
+        </Animated.Text>
+        <Text style={s.skips}>
+          {"●".repeat(skipsLeft)}
+          <Text style={{ color: C.cardBorder }}>{"●".repeat(settings.maxSkips - skipsLeft)}</Text>
+        </Text>
       </View>
 
-      <Pressable
-        style={s.card}
-        onPressIn={() => setRevealed(true)}
-        onPressOut={() => setRevealed(false)}
+      <Animated.View
+        style={[s.cardWrap, { transform: [{ scale: cardScale }, { translateX: cardShake }] }]}
       >
-        {revealed && movie ? (
-          <>
-            {(settings.language === "en" || settings.language === "both") && (
-              <Text style={s.movieEn}>{movie.movieName}</Text>
-            )}
-            {(settings.language === "hi" || settings.language === "both") && !!movie.movieNameHindi && (
-              <Text style={s.movieHi}>{movie.movieNameHindi}</Text>
-            )}
-            <Text style={s.year}>({movie.year})</Text>
-            <View style={{ marginTop: 14 }}>
-              {movie.cast.map((c, i) => (
-                <Text key={i} style={s.cast}>
-                  {c.role === "hero" ? "🤵" : "👰"} {c.name}
-                </Text>
-              ))}
-            </View>
-          </>
-        ) : (
-          <>
-            <Text style={{ fontSize: 44 }}>🤫</Text>
-            <Text style={s.holdHint}>Hold to reveal{"\n"}(actor only!)</Text>
-          </>
-        )}
-      </Pressable>
+        <Pressable
+          style={s.card}
+          onPressIn={() => setRevealed(true)}
+          onPressOut={() => setRevealed(false)}
+        >
+          {revealed && movie ? (
+            <>
+              {settings.language === "en" && (
+                <Text style={s.movieEn}>{movie.movieName}</Text>
+              )}
+              {settings.language === "hi" && (
+                <Text style={s.movieHi}>{movie.movieNameHindi || movie.movieName}</Text>
+              )}
+              {settings.language === "both" && (
+                <>
+                  <Text style={s.movieEn}>{movie.movieName}</Text>
+                  {!!movie.movieNameHindi && (
+                    <Text style={s.movieHi}>{movie.movieNameHindi}</Text>
+                  )}
+                </>
+              )}
+              <Text style={s.year}>({movie.year})</Text>
+              <View style={{ marginTop: 16 }}>
+                {movie.cast.map((c, i) => (
+                  <Text key={i} style={s.cast}>
+                    {c.role === "hero" ? "🤵" : "👰"} {c.name}
+                  </Text>
+                ))}
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={{ fontSize: 48 }}>🤫</Text>
+              <Text style={s.holdHint}>Hold to reveal{"\n"}(actor only!)</Text>
+            </>
+          )}
+        </Pressable>
 
-      <Text style={s.guessedLine}>Guessed this turn: {guessed}</Text>
+        {/* celebration overlay */}
+        <Animated.View pointerEvents="none" style={[s.flash, { opacity: flash }]} />
+        <Animated.Text
+          pointerEvents="none"
+          style={[s.plusOne, { opacity: plusOneOpacity, transform: [{ translateY: plusOneY }] }]}
+        >
+          +1 🎉
+        </Animated.Text>
+      </Animated.View>
+
+      <Text style={s.guessedLine}>
+        Guessed this turn: <Text style={{ color: C.green, fontFamily: FONT.bodyBold }}>{guessed}</Text>
+      </Text>
 
       <View style={s.btnRow}>
-        <Pressable style={[s.actionBtn, { backgroundColor: C.red }]} onPress={onSkip}>
-          <Text style={s.actionText}>Skip ({skipsLeft})</Text>
-        </Pressable>
-        <Pressable style={[s.actionBtn, { backgroundColor: C.green }]} onPress={onNext}>
-          <Text style={s.actionText}>Guessed ✓ Next</Text>
-        </Pressable>
+        <GlowButton label={`Skip (${skipsLeft})`} color={C.red} onPress={onSkip} style={{ flex: 1 }} />
+        <GlowButton label="Guessed ✓" color={C.green} onPress={onNext} style={{ flex: 1.4 }} />
       </View>
-    </View>
+    </Screen>
   );
 }
 
-function Center({ children }: { children: React.ReactNode }) {
-  return <View style={[s.root, { alignItems: "center", justifyContent: "center" }]}>{children}</View>;
-}
-
-function Cta({ label, onPress }: { label: string; onPress: () => void }) {
-  return (
-    <Pressable style={s.cta} onPress={onPress}>
-      <Text style={s.ctaText}>{label}</Text>
-    </Pressable>
-  );
-}
-
-const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: C.bg, padding: 24, paddingTop: 60 },
-  bigEmoji: { fontSize: 64 },
-  h1: { fontSize: 26, fontWeight: "800", color: C.text, marginTop: 10, textAlign: "center" },
-  p: { color: C.dim, textAlign: "center", marginVertical: 14, fontSize: 15, lineHeight: 22 },
-  cta: { backgroundColor: C.accent, borderRadius: 16, padding: 18, paddingHorizontal: 30, marginTop: 10 },
-  ctaText: { fontSize: 17, fontWeight: "800", color: C.bg },
-  topBar: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  teamTag: { fontSize: 16, fontWeight: "800" },
-  timer: { fontSize: 40, fontWeight: "900", color: C.text, fontVariant: ["tabular-nums"] },
-  skips: { fontSize: 18, color: C.accent, letterSpacing: 3 },
-  card: {
-    backgroundColor: C.card, borderRadius: 24, flex: 1, marginVertical: 20,
-    alignItems: "center", justifyContent: "center", padding: 24,
+const getStyles = (C: any) => StyleSheet.create({
+  center: { alignItems: "center", justifyContent: "center", padding: 24 },
+  bigEmoji: { fontSize: 72 },
+  phaseIcon: { width: 120, height: 120, marginBottom: 12, resizeMode: "contain" },
+  h1: { fontSize: 30, fontFamily: FONT.displayBold, color: C.text, marginTop: 12, textAlign: "center" },
+  p: { color: C.dim, textAlign: "center", marginVertical: 18, fontSize: 16, lineHeight: 24, fontFamily: FONT.body },
+  topBar: { flexDirection: "row", alignItems: "center", gap: 12 },
+  exitMini: {
+    width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center",
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.cardBorder,
   },
-  holdHint: { color: C.dim, textAlign: "center", marginTop: 10, fontSize: 16 },
-  movieEn: { fontSize: 30, fontWeight: "900", color: C.text, textAlign: "center" },
-  movieHi: { fontSize: 26, fontWeight: "700", color: C.accent, textAlign: "center", marginTop: 6 },
-  year: { color: C.dim, fontSize: 16, marginTop: 8 },
-  cast: { color: C.text, fontSize: 17, textAlign: "center", marginTop: 4 },
-  guessedLine: { color: C.dim, textAlign: "center", marginBottom: 12 },
+  teamTag: { fontSize: 16, fontFamily: FONT.displayBold, flex: 1 },
+  timer: { fontSize: 42, fontFamily: FONT.displayBold, color: C.text, fontVariant: ["tabular-nums"] },
+  skips: { fontSize: 16, color: C.accent, letterSpacing: 3, marginLeft: 4 },
+  cardWrap: { flex: 1, marginVertical: 20 },
+  card: {
+    flex: 1, backgroundColor: C.card, borderRadius: 28, alignItems: "center", justifyContent: "center",
+    padding: 24, borderWidth: 1.5, borderColor: C.cardBorder,
+    shadowColor: C.pink, shadowOpacity: 0.25, shadowRadius: 24, shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
+  },
+  flash: {
+    ...StyleSheet.absoluteFillObject, borderRadius: 28, backgroundColor: C.green + "40",
+    borderWidth: 2, borderColor: C.green,
+  },
+  plusOne: {
+    position: "absolute", alignSelf: "center", top: "38%",
+    fontSize: 44, fontFamily: FONT.displayBold, color: C.green,
+    textShadowColor: C.green, textShadowRadius: 18, textShadowOffset: { width: 0, height: 0 },
+  },
+  holdHint: { color: C.dim, textAlign: "center", marginTop: 12, fontSize: 17, fontFamily: FONT.body },
+  movieEn: { fontSize: 32, fontFamily: FONT.displayBold, color: C.text, textAlign: "center" },
+  movieHi: { fontSize: 27, fontFamily: FONT.display, color: C.accent, textAlign: "center", marginTop: 8 },
+  year: { color: C.dim, fontSize: 16, marginTop: 10, fontFamily: FONT.body },
+  cast: { color: C.text, fontSize: 17, textAlign: "center", marginTop: 5, fontFamily: FONT.body },
+  guessedLine: { color: C.dim, textAlign: "center", marginBottom: 14, fontSize: 15, fontFamily: FONT.body },
   btnRow: { flexDirection: "row", gap: 12 },
-  actionBtn: { flex: 1, borderRadius: 16, padding: 18, alignItems: "center" },
-  actionText: { fontSize: 16, fontWeight: "800", color: "#fff" },
 });
+

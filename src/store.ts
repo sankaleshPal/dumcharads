@@ -1,16 +1,18 @@
 import { create } from "zustand";
 import type { GameSettings, Team } from "./types";
-import { MAX_SKIPS, TEAM_COLORS, YEAR_MAX, YEAR_MIN } from "./constants";
+import { MAX_SKIPS, TEAM_COLORS, YEAR_MAX, YEAR_MIN, themes } from "./constants";
 
 type State = {
   user: { name: string; avatarId: number } | null;
   settings: GameSettings;
   teams: [Team, Team];
+  theme: "dark" | "light";
   setUser: (u: State["user"]) => void;
   setSettings: (s: Partial<GameSettings>) => void;
   setTeamName: (i: 0 | 1, name: string) => void;
   addScore: (i: 0 | 1, pts: number) => void;
   resetGame: () => void;
+  toggleTheme: () => void;
 };
 
 const defaultTeams = (): [Team, Team] => [
@@ -29,6 +31,7 @@ export const useStore = create<State>((set) => ({
     maxSkips: MAX_SKIPS,
   },
   teams: defaultTeams(),
+  theme: "dark",
   setUser: (user) => set({ user }),
   setSettings: (s) => set((st) => ({ settings: { ...st.settings, ...s } })),
   setTeamName: (i, name) =>
@@ -44,4 +47,11 @@ export const useStore = create<State>((set) => ({
       return { teams };
     }),
   resetGame: () => set({ teams: defaultTeams() }),
+  toggleTheme: () => set((st) => ({ theme: st.theme === "dark" ? "light" : "dark" })),
 }));
+
+export const useThemeColors = () => {
+  const theme = useStore((s) => s.theme);
+  return themes[theme];
+};
+

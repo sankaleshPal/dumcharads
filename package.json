@@ -8,16 +8,25 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@expo-google-fonts/fredoka": "^0.4.1",
+    "@expo-google-fonts/nunito": "^0.4.2",
     "expo": "~53.0.0",
+    "expo-asset": "^57.0.6",
+    "expo-font": "~13.3.2",
     "expo-haptics": "~14.1.0",
+    "expo-linear-gradient": "~14.1.5",
     "expo-linking": "~7.1.0",
     "expo-router": "~5.0.0",
     "expo-sqlite": "~15.2.0",
     "expo-status-bar": "~2.2.0",
+    "lottie-react-native": "7.2.2",
     "react": "19.0.0",
+    "react-dom": "19.0.0",
     "react-native": "0.79.2",
     "react-native-safe-area-context": "5.4.0",
     "react-native-screens": "~4.10.0",
+    "react-native-web": "^0.20.0",
+    "wa-sqlite": "^1.0.0",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
